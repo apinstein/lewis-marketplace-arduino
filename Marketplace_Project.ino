@@ -3,12 +3,34 @@
 //https://wokwi.com/projects/new/arduino-uno
 
 #include <Keypad.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 
+#define FIRST_BASE_TOGGLE '3'
+#define SECOND_BASE_TOGGLE '6'
+#define THIRD_BASE_TOGGLE '9'
+#define ADD_SCORE '1'
+#define SUBTRACT_SCORE '2'
+#define ADD_STRIKES '4'
+#define SUBTRACT_STRIKES '5'
+#define ADD_OUTS '7'
+#define SUBTRACT_OUTS '8'
+#define RESET_ALL 'A'
+#define RECALIBRATE_SENSORS 'B'
+#define RESET_PAUSE_TIMER 'C'
+
+// Set the LCD address to 0x27 for a 16 chars and 2 line display
+// Adjust the address as needed, which can be found using an I2C scanner sketch
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+unsigned long lcdGOdsp = 0;  // time when game ended
 bool isPaused = false;
-
-unsigned long timerStart = 0; // Stores the last time the timer was started
-unsigned long timerDuration = 30000; // Timer duration in milliseconds (30 seconds)
-bool timerRunning = false; // Indicates whether the timer is currently running
+unsigned long timerStart = 0;         // Stores the last time the timer was started
+unsigned long timerDuration = 30000;  // Timer duration in milliseconds (30 seconds)
+bool timerRunning = false;            // Indicates whether the timer is currently running
+bool timerJustStarted = false;        // Flag to handle initial timer start
+bool firstBase = false;
+bool secondBase = false;
+bool thirdBase = false;
 
 int strikes = 0;
 int outs = 0;
@@ -49,36 +71,24 @@ void calibrateSensorO() {
   Serial.println(outsensorValue);
 }
 
-void enterPauseState() {
-  isPaused = true; // Enter paused state
-  while (isPaused) {
-    // Check for a condition to exit pause, e.g., a specific key press
-    char customKey = customKeypad.getKey();
-    if (customKey == 'R') { // Assuming 'R' is the resume key
-      isPaused = false; // Exit paused state
-    }
-    // Optionally, include a small delay to prevent the loop from running too fast
-    delay(100);
-  }
-}
-
+//TIMER FUNCTIONS START
 void startTimer() {
   if (!timerRunning) {
-    timerStart = millis(); // Update start time
-    timerRunning = true; // Mark the timer as running
+    timerStart = millis();  // Update start time
+    timerRunning = true;    // Mark the timer as running
     Serial.println("Timer started");
     printTimerClean();
   }
 }
 
 void pauseTimer() {
-  timerRunning = false; // Mark the timer as not running
+  timerRunning = false;  // Mark the timer as not running
   Serial.println("Timer paused");
 }
 
 void resetTimer() {
-  timerRunning = false; // Ensure the timer is not running
-  timerStart = millis(); // Reset the start time to now, for consistency
+  timerRunning = false;   // Ensure the timer is not running
+  timerStart = millis();  // Reset the start time to now, for consistency
   Serial.println("Timer reset");
 }
 
@@ -88,50 +98,139 @@ unsigned long getCurrentTime() {
     return timerDuration - (millis() - timerStart);
   } else {
     // If the timer is paused or stopped, return the time until it was paused/stopped
-    return timerDuration; // Adjust this logic as needed
+    return timerDuration;  // Adjust this logic as needed
   }
 }
 
-void setup() { delay(100);
-  pinMode(A1, INPUT);
-  pinMode(A0, INPUT);  //photoresistor / proximity sensor for pitching
-  //add I2C 4 digit 7 segment display; LCD screen
-  Serial.begin(9600);
-  calibrateSensorP();
-  calibrateSensorO();
+
+void displayScore() {  //LCD DISPLAY LOGIC
+  char lcdDisplay[2][16] = {
+    "",
+    ""
+  };
+  // structure lcdDisplay[0] and lcdDisplay[1] as desried
+  // sprintf(....)
+  sprintf(&lcdDisplay[0][0], "Strikes %d|Outs %d", strikes, outs);
+  sprintf(&lcdDisplay[1][0], " _ _ _ | Bases  ");
+
+  lcdDisplay[1][1] = firstBase ? '1' : '_';
+  lcdDisplay[1][3] = secondBase ? '2' : '_';
+  lcdDisplay[1][5] = thirdBase ? '3' : '_';
+
+  if (lcdGOdsp) {  // Game over condition
+    if (millis() - lcdGOdsp < 3000) {
+      // display "game over" for a few seconds
+      sprintf(&lcdDisplay[0][0], "Game Over!         ");
+      sprintf(&lcdDisplay[1][0], "Your score is %d", score);
+    }
+    else if(score >= 10) {
+      sprintf(&lcdDisplay[0][0], "Congratulations!");
+      sprintf(&lcdDisplay[1][0], "You get a prize!");
+    }
+    else {  // lost
+      sprintf(&lcdDisplay[0][0], "No prize! ");
+      sprintf(&lcdDisplay[1][0], "Not enough runs!");
+    }
+  }
+
+  // send line 1 to display
+  lcd.setCursor(0, 0);
+  lcd.print(lcdDisplay[0]);
+
+  // send line 2 to display
+  lcd.setCursor(0, 1);
+  lcd.print(lcdDisplay[1]);
+}
+
+void plotValues() {  //DEBUG PHOTORESISTORS
+  char plotterData[100];
+  // pitching sensor data
+  int pitchingsensorValue = analogRead(A0);
+
+  // out sensor data
+  int outsensorValue = analogRead(A1);
+  sprintf(plotterData, "%d,%d", pitchingsensorValue, outsensorValue);
+  Serial.println(plotterData);
 }
 
 int lastTimerAmount = 0;
-void printTimerClean()
-{
+void printTimerClean() {
   int timerAmount = getCurrentTime() / 1000;
   if (timerAmount != lastTimerAmount) {
-    Serial.println(timerAmount);
     lastTimerAmount = timerAmount;
   }
 }
 
-void loop() {
-  printTimerClean();
+void markGameOver() {
+  lcdGOdsp = millis();  // log time of game over
+}
 
+void addOut() {
+  if (outs < 3) {
+    outs += 1;
+
+    // game over?
+    if (outs == 3) {
+      markGameOver();
+    }
+  }
+
+}
+
+
+void setup() {  //VOID SETUP START
+  delay(1000);  // Wait a bit before initializing serial to reduce startup noise
+  pinMode(A1, INPUT);
+  pinMode(A0, INPUT);  // Photoresistor / proximity sensor for pitching
+  Serial.begin(9600);
+  lcd.init();       // Initialize the LCD
+  lcd.backlight();  // Turn on the backlight
+  while (!Serial)
+    ;                                // Wait for Serial port to connect - necessary for Leonardo, Micro, etc.
+  Serial.println("Setup complete");  // First message to indicate setup is done
+  calibrateSensorP();
+  calibrateSensorO();
+  displayScore();
+}
+
+void loop() {  //VOID LOOP START
+  // plotValues();
+  printTimerClean();
+  displayScore();
   //keypad
   char customKey = customKeypad.getKey();
   if (customKey) {
   }
 
+  //keypad c = pause timer
+  if (customKey == 'RESET_PAUSE_TIMER') {
+    resetTimer();
+    pauseTimer();
+  }
   // photoresistor pitching
   int pitchingsensorValue = analogRead(A0);
 
   if (pitchingsensorValue <= calibratedsensorValueP) {
-    Serial.println("timer reset");
-    resetTimer();
-  delay(50);
-  startTimer();
-    delay(1000);
-    //add func timer reset + timer start
+    startTimer();
+    if (getCurrentTime <= 10) {
+      timerDuration = 30000;
+    }
   }
 
-  if (customKey == 'B') {
+  //bases on keypad
+  if (customKey == FIRST_BASE_TOGGLE) {
+    firstBase = !firstBase;
+  }
+
+  if (customKey == SECOND_BASE_TOGGLE) {
+    secondBase = !secondBase;
+  }
+  if (customKey == THIRD_BASE_TOGGLE) {
+    thirdBase = !thirdBase;
+  }
+
+
+  if (customKey == RECALIBRATE_SENSORS) {
     calibrateSensorP();
     calibrateSensorO();
   }
@@ -139,147 +238,57 @@ void loop() {
   int outsensorValue = analogRead(A1);
 
   if (outsensorValue <= calibratedsensorValueO) {
-    Serial.println("adding out");
-    delay(1000);
     pauseTimer();
-    outs = outs + 1;
+    timerDuration += 5000;
+    addOut();
+    delay(500);
   }
   //reset all
-  if (customKey == 'A') {
+  if (customKey == RESET_ALL) {
     outs = 0;
     score = 0;
     strikes = 0;
     resetTimer();
+    lcdGOdsp = 0;  // reset game over event time
+    Serial.println("Resetting all");
   }
-//timer = 0 + out
-if (getCurrentTime() == 0) {
-  outs = outs + 1;
-  resetTimer();
-}
-  //strike outs score plus
-  if (customKey == '1') {
-    score = score + 1;
-    Serial.println("----");
-
-    Serial.print("Score ");
-    Serial.println(score);
-
-    Serial.print("Strikes ");
-    Serial.println(strikes);
-
-    Serial.print("Outs ");
-    Serial.println(outs);
-
-    delay(750);
-  }
-
-  if (customKey == '4') {  //add strikes
+  //timer = 0 + out
+  if (getCurrentTime() == 0) {
     strikes = strikes + 1;
-    Serial.println("----");
-
-    Serial.println(score);
-    Serial.print("Score ");
-
-    Serial.println(strikes);
-    Serial.print("Strikes ");
-
-    Serial.print(outs);
-    Serial.println("Outs ");
-
-    delay(750);
+    resetTimer();
+  }
+  //strike outs score plus
+  if (customKey == ADD_SCORE) {
+    score = score + 1;
+    if (score == 10) {
+      markGameOver();
+    }
   }
 
-  if (customKey == '7') {  //add outs
-    outs = outs + 1;
-    Serial.println("----");
+  if (customKey == ADD_STRIKES) {  //add strikes
+    strikes = strikes + 1;
+  }
 
-    Serial.println(score);
-    Serial.print("Score ");
-
-    Serial.println(strikes);
-    Serial.print("Strikes ");
-
-    Serial.print(outs);
-    Serial.println("Outs ");
-
-    delay(750);
+  if (customKey == ADD_OUTS) {  //add outs
+    addOut();
   }
 
   //score strike outs minus
-  if (customKey == '2') {  //subtract score
+  if (customKey == SUBTRACT_SCORE) {  //subtract score
     score = score - 1;
-    Serial.println("----");
-
-    Serial.println(score);
-    Serial.print("Score ");
-
-    Serial.println(strikes);
-    Serial.print("Strikes ");
-
-    Serial.print(outs);
-    Serial.println("Outs ");
-
-    delay(750);
   }
 
-  if (customKey == '5') {  //subtract strikes
+  if (customKey == SUBTRACT_STRIKES) {  //subtract strikes
     strikes = strikes - 1;
-    Serial.println("----");
-
-    Serial.println(score);
-    Serial.print("Score ");
-
-    Serial.println(strikes);
-    Serial.print("Strikes ");
-
-    Serial.print(outs);
-    Serial.println("Outs ");
-
-    delay(750);
   }
 
-  if (customKey == '8') {  //subtract outs
+  if (customKey == SUBTRACT_OUTS) {  //subtract outs
     outs = outs - 1;
-    Serial.println("----");
-
-    Serial.println(score);
-    Serial.print("Score ");
-
-    Serial.println(strikes);
-    Serial.print("Strikes ");
-
-    Serial.print(outs);
-    Serial.println("Outs ");
-
-    delay(750);
   }
 
   if (strikes == 3) {  //3 strikes = 1 out
     strikes = 0;
-    outs = outs + 1;
-    Serial.println("----");
-
-    Serial.println(score);
-    Serial.print("Score ");
-
-    Serial.println(strikes);
-    Serial.print("Strikes ");
-
-    Serial.print(outs);
-    Serial.println("Outs ");
+    addOut();
   }
 
-  if (outs == 3) {  // Game over condition
-  Serial.println("Game over!");
-  Serial.print("Your score was ");
-  Serial.println(score);
-  enterPauseState(); // Pause the program instead of using delay
-}
-
-  if (score == 10) {
-    Serial.println("You win! Pick your prize(s)");
-  }
-  if (score >= 10) {
-    Serial.println("You've won! Stop any time you want and collect your prize!");  // Line is buggy
-  }
 }
