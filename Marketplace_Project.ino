@@ -83,7 +83,7 @@ void startTimer() {
 
 void pauseTimer() {
   timerRunning = false;  // Mark the timer as not running
-  Serial.println("Timer paused");
+  // Serial.println("Timer paused");
 }
 
 void resetTimer() {
@@ -104,14 +104,13 @@ unsigned long getCurrentTime() {
 
 
 void displayScore() {  //LCD DISPLAY LOGIC
-  char lcdDisplay[2][16] = {
+  char lcdDisplay[2][17] = { // 17 is b/c 16 chars + NULL string terminator
     "",
     ""
   };
   // structure lcdDisplay[0] and lcdDisplay[1] as desried
-  // sprintf(....)
-  sprintf(&lcdDisplay[0][0], "Strikes %d|Outs %d", strikes, outs);
-  sprintf(&lcdDisplay[1][0], " _ _ _ | Bases  ");
+  snprintf(lcdDisplay[0], sizeof(lcdDisplay[0]), "Strikes %d|Outs %d", strikes, outs);
+  snprintf(lcdDisplay[1], sizeof(lcdDisplay[1]), " _ _ _ | Bases       ");
 
   lcdDisplay[1][1] = firstBase ? '1' : '_';
   lcdDisplay[1][3] = secondBase ? '2' : '_';
@@ -120,16 +119,14 @@ void displayScore() {  //LCD DISPLAY LOGIC
   if (lcdGOdsp) {  // Game over condition
     if (millis() - lcdGOdsp < 3000) {
       // display "game over" for a few seconds
-      sprintf(&lcdDisplay[0][0], "Game Over!         ");
-      sprintf(&lcdDisplay[1][0], "Your score is %d", score);
-    }
-    else if(score >= 10) {
-      sprintf(&lcdDisplay[0][0], "Congratulations!");
-      sprintf(&lcdDisplay[1][0], "You get a prize!");
-    }
-    else {  // lost
-      sprintf(&lcdDisplay[0][0], "No prize! ");
-      sprintf(&lcdDisplay[1][0], "Not enough runs!");
+      snprintf(lcdDisplay[0], sizeof(lcdDisplay[0]),  "Game Over!         ");
+      snprintf(lcdDisplay[1], sizeof(lcdDisplay[1]), "Your score is %d", score);
+    } else if (score >= 10) {
+      snprintf(lcdDisplay[0], sizeof(lcdDisplay[0]), "Congratulations!");
+      snprintf(lcdDisplay[1], sizeof(lcdDisplay[1]), "You get a prize!");
+    } else {  // lost
+      snprintf(lcdDisplay[0], sizeof(lcdDisplay[0]), "No prize! ");
+      snprintf(lcdDisplay[1], sizeof(lcdDisplay[1]), "Not enough runs!");
     }
   }
 
@@ -149,7 +146,7 @@ void plotValues() {  //DEBUG PHOTORESISTORS
 
   // out sensor data
   int outsensorValue = analogRead(A1);
-  sprintf(plotterData, "%d,%d", pitchingsensorValue, outsensorValue);
+  snprintf(plotterData, sizeof(plotterData), "%d,%d", pitchingsensorValue, outsensorValue);
   Serial.println(plotterData);
 }
 
@@ -166,6 +163,7 @@ void markGameOver() {
 }
 
 void addOut() {
+  return;
   if (outs < 3) {
     outs += 1;
 
@@ -174,7 +172,6 @@ void addOut() {
       markGameOver();
     }
   }
-
 }
 
 
@@ -194,7 +191,6 @@ void setup() {  //VOID SETUP START
 }
 
 void loop() {  //VOID LOOP START
-  // plotValues();
   printTimerClean();
   displayScore();
   //keypad
@@ -212,9 +208,11 @@ void loop() {  //VOID LOOP START
 
   if (pitchingsensorValue <= calibratedsensorValueP) {
     startTimer();
+    strikes += 1;
     if (getCurrentTime <= 10) {
       timerDuration = 30000;
     }
+    // delay(1000);
   }
 
   //bases on keypad
@@ -241,7 +239,7 @@ void loop() {  //VOID LOOP START
     pauseTimer();
     timerDuration += 5000;
     addOut();
-    delay(500);
+    // delay(1000);
   }
   //reset all
   if (customKey == RESET_ALL) {
@@ -291,4 +289,5 @@ void loop() {  //VOID LOOP START
     addOut();
   }
 
+  plotValues();
 }
