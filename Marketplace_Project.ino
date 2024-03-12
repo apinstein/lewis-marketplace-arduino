@@ -1,10 +1,17 @@
 
 //Arduino marketplace scoreboard
 //https://wokwi.com/projects/new/arduino-uno
-
+#include <TM1637Display.h>
 #include <Keypad.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+
+
+#define SEVEN_SEG_CLOCK_PIN 12
+#define SEVEN_SEG_DIO_PIN 13
 
 #define FIRST_BASE_TOGGLE '3'
 #define SECOND_BASE_TOGGLE '6'
@@ -19,15 +26,20 @@
 #define RECALIBRATE_SENSORS 'B'
 #define RESET_PAUSE_TIMER 'C'
 
+// How long does a new clock last for a turn
+#define TURN_DURATION 6
+
 // Set the LCD address to 0x27 for a 16 chars and 2 line display
 // Adjust the address as needed, which can be found using an I2C scanner sketch
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 unsigned long lcdGOdsp = 0;  // time when game ended
 bool isPaused = false;
-unsigned long timerStart = 0;         // Stores the last time the timer was started
-unsigned long timerDuration = 30000;  // Timer duration in milliseconds (30 seconds)
-bool timerRunning = false;            // Indicates whether the timer is currently running
-bool timerJustStarted = false;        // Flag to handle initial timer start
+
+
+int turnSecsRemaining = TURN_DURATION;
+unsigned long turnLastSecondCountdown = 0;  // millis() of last time we reduced turnSecsRemaining
+bool timerRunning = false;  // Indicates whether the timer is currently running
+
 bool firstBase = false;
 bool secondBase = false;
 bool thirdBase = false;
@@ -37,6 +49,15 @@ int outs = 0;
 int score = 0;
 int calibratedsensorValueP = 0;
 int calibratedsensorValueO = 0;
+
+// Create a display object of type TM1637Display
+TM1637Display display = TM1637Display(SEVEN_SEG_CLOCK_PIN, SEVEN_SEG_DIO_PIN);
+
+// Create an array that turns all segments ON
+const uint8_t allON[] = { 0xff, 0xff, 0xff, 0xff };
+
+// Create an array that turns all segments OFF
+const uint8_t allOFF[] = { 0x00, 0x00, 0x00, 0x00 };
 
 const byte ROWS = 4;  //four rows
 const byte COLS = 4;  //four columns
@@ -52,6 +73,46 @@ byte rowPins[ROWS] = { 2, 3, 4, 5 };  //connect to the row pinouts of the keypad
 byte colPins[COLS] = { 6, 7, 8, 9 };  //connect to the column pinouts of the keypad
 //initialize an instance of class NewKeypad
 Keypad customKeypad = Keypad(makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS);
+
+volatile bool timerFlag = false;
+void setupOneSecondTimerInterrupt() {
+  cli();  // Disable global interrupts
+
+  // Configure Timer1 for a 1-second interrupt
+  TCCR1A = 0;  // Set entire TCCR1A register to 0
+  TCCR1B = 0;  // Same for TCCR1B
+
+  // Set compare match register to desired timer count:
+  // 16MHz Clock / 256 prescaler / 1Hz (1 second)
+  OCR1A = 62499;  // = (16*10^6) / (256*1) - 1 (must be <65536)
+
+  // Turn on CTC mode (Clear Timer on Compare Match)
+  TCCR1B |= (1 << WGM12);
+
+  // Set CS12 bit for 256 prescaler
+  TCCR1B |= (1 << CS12);
+
+  // Enable timer compare interrupt
+  TIMSK1 |= (1 << OCIE1A);
+
+  sei();  // Enable global interrupts
+}
+
+ISR(TIMER1_COMPA_vect) {
+  timerFlag = true;
+}
+
+void checkTimerDecrement() {
+  if (timerFlag) {
+    timerFlag = false;
+    Serial.println("1 second passed");
+
+    if (timerRunning) {
+      turnSecsRemaining--;
+      printTimerClean();
+    }
+  }
+}
 
 void calibrateSensorP() {
   int pitchingsensorValue = analogRead(A0);
@@ -74,8 +135,7 @@ void calibrateSensorO() {
 //TIMER FUNCTIONS START
 void startTimer() {
   if (!timerRunning) {
-    timerStart = millis();  // Update start time
-    timerRunning = true;    // Mark the timer as running
+    timerRunning = true;  // Mark the timer as running
     Serial.println("Timer started");
     printTimerClean();
   }
@@ -87,26 +147,19 @@ void pauseTimer() {
 }
 
 void resetTimer() {
-  timerRunning = false;   // Ensure the timer is not running
-  timerStart = millis();  // Reset the start time to now, for consistency
+  turnSecsRemaining = TURN_DURATION;
   Serial.println("Timer reset");
 }
 
 unsigned long getCurrentTime() {
-  if (timerRunning) {
-    // Calculate the time elapsed since the timer started
-    return timerDuration - (millis() - timerStart);
-  } else {
-    // If the timer is paused or stopped, return the time until it was paused/stopped
-    return timerDuration;  // Adjust this logic as needed
-  }
+  return turnSecsRemaining;
 }
 
 
-void displayScore() {  //LCD DISPLAY LOGIC
+void displayScore() {        //LCD DISPLAY LOGIC
   char lcdDisplay[2][17] = { // 17 is b/c 16 chars + NULL string terminator
-    "",
-    ""
+                             "",
+                             ""
   };
   // structure lcdDisplay[0] and lcdDisplay[1] as desried
   snprintf(lcdDisplay[0], sizeof(lcdDisplay[0]), "Strikes %d|Outs %d", strikes, outs);
@@ -119,7 +172,7 @@ void displayScore() {  //LCD DISPLAY LOGIC
   if (lcdGOdsp) {  // Game over condition
     if (millis() - lcdGOdsp < 3000) {
       // display "game over" for a few seconds
-      snprintf(lcdDisplay[0], sizeof(lcdDisplay[0]),  "Game Over!         ");
+      snprintf(lcdDisplay[0], sizeof(lcdDisplay[0]), "Game Over!         ");
       snprintf(lcdDisplay[1], sizeof(lcdDisplay[1]), "Your score is %d", score);
     } else if (score >= 10) {
       snprintf(lcdDisplay[0], sizeof(lcdDisplay[0]), "Congratulations!");
@@ -152,9 +205,13 @@ void plotValues() {  //DEBUG PHOTORESISTORS
 
 int lastTimerAmount = 0;
 void printTimerClean() {
-  int timerAmount = getCurrentTime() / 1000;
+  int timerAmount = turnSecsRemaining;
   if (timerAmount != lastTimerAmount) {
     lastTimerAmount = timerAmount;
+
+    // Serial.println("Updating Timer Display");
+    display.showNumberDec(timerAmount);
+    // Serial.println(timerAmount);
   }
 }
 
@@ -176,12 +233,14 @@ void addOut() {
 
 
 void setup() {  //VOID SETUP START
+  setupOneSecondTimerInterrupt();
   delay(1000);  // Wait a bit before initializing serial to reduce startup noise
   pinMode(A1, INPUT);
   pinMode(A0, INPUT);  // Photoresistor / proximity sensor for pitching
   Serial.begin(9600);
-  lcd.init();       // Initialize the LCD
-  lcd.backlight();  // Turn on the backlight
+  lcd.init();                // Initialize the LCD
+  lcd.backlight();           // Turn on the backlight
+  display.setBrightness(5);  // Turn on the 7 seg display
   while (!Serial)
     ;                                // Wait for Serial port to connect - necessary for Leonardo, Micro, etc.
   Serial.println("Setup complete");  // First message to indicate setup is done
@@ -191,6 +250,8 @@ void setup() {  //VOID SETUP START
 }
 
 void loop() {  //VOID LOOP START
+
+  checkTimerDecrement();
   printTimerClean();
   displayScore();
   //keypad
@@ -209,8 +270,8 @@ void loop() {  //VOID LOOP START
   if (pitchingsensorValue <= calibratedsensorValueP) {
     startTimer();
     strikes += 1;
-    if (getCurrentTime <= 10) {
-      timerDuration = 30000;
+    if (getCurrentTime() <= 5) {
+      resetTimer();
     }
     // delay(1000);
   }
@@ -237,9 +298,9 @@ void loop() {  //VOID LOOP START
 
   if (outsensorValue <= calibratedsensorValueO) {
     pauseTimer();
-    timerDuration += 5000;
+    turnSecsRemaining += 3;
     addOut();
-    // delay(1000);
+    delay(1000);
   }
   //reset all
   if (customKey == RESET_ALL) {
@@ -252,8 +313,9 @@ void loop() {  //VOID LOOP START
   }
   //timer = 0 + out
   if (getCurrentTime() == 0) {
-    strikes = strikes + 1;
+    strikes = strikes + 2;
     resetTimer();
+    pauseTimer();
   }
   //strike outs score plus
   if (customKey == ADD_SCORE) {
@@ -288,6 +350,4 @@ void loop() {  //VOID LOOP START
     strikes = 0;
     addOut();
   }
-
-  plotValues();
 }
