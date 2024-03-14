@@ -9,7 +9,8 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 
-
+// PINS
+#define PROX_SENSOR_PIN 2
 #define SEVEN_SEG_CLOCK_PIN 12
 #define SEVEN_SEG_DIO_PIN 13
 
@@ -24,10 +25,10 @@
 #define SUBTRACT_OUTS '8'
 #define RESET_ALL 'A'
 #define RECALIBRATE_SENSORS 'B'
-#define RESET_PAUSE_TIMER 'C'
+#define TOGGLE_TIMER 'C'
 
 // How long does a new clock last for a turn
-#define TURN_DURATION 6
+#define TURN_DURATION 30
 
 // Set the LCD address to 0x27 for a 16 chars and 2 line display
 // Adjust the address as needed, which can be found using an I2C scanner sketch
@@ -35,10 +36,10 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 unsigned long lcdGOdsp = 0;  // time when game ended
 bool isPaused = false;
 
-
 int turnSecsRemaining = TURN_DURATION;
 unsigned long turnLastSecondCountdown = 0;  // millis() of last time we reduced turnSecsRemaining
-bool timerRunning = false;  // Indicates whether the timer is currently running
+bool timerRunning = false;                  // Indicates whether the timer is currently running
+bool timerButtonToggle = false;
 
 bool firstBase = false;
 bool secondBase = false;
@@ -47,8 +48,7 @@ bool thirdBase = false;
 int strikes = 0;
 int outs = 0;
 int score = 0;
-int calibratedsensorValueP = 0;
-int calibratedsensorValueO = 0;
+int calibratedOutSensorValue = 0;
 
 // Create a display object of type TM1637Display
 TM1637Display display = TM1637Display(SEVEN_SEG_CLOCK_PIN, SEVEN_SEG_DIO_PIN);
@@ -69,8 +69,8 @@ char hexaKeys[ROWS][COLS] = {
   { '*', '0', '#', 'D' }
 };
 
-byte rowPins[ROWS] = { 2, 3, 4, 5 };  //connect to the row pinouts of the keypad
-byte colPins[COLS] = { 6, 7, 8, 9 };  //connect to the column pinouts of the keypad
+byte rowPins[ROWS] = { 3, 4, 5, 6 };   //connect to the row pinouts of the keypad
+byte colPins[COLS] = { 7, 8, 9, 10 };  //connect to the column pinouts of the keypad
 //initialize an instance of class NewKeypad
 Keypad customKeypad = Keypad(makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS);
 
@@ -105,7 +105,7 @@ ISR(TIMER1_COMPA_vect) {
 void checkTimerDecrement() {
   if (timerFlag) {
     timerFlag = false;
-    Serial.println("1 second passed");
+    // Serial.println("1 second passed");
 
     if (timerRunning) {
       turnSecsRemaining--;
@@ -114,20 +114,32 @@ void checkTimerDecrement() {
   }
 }
 
-void calibrateSensorP() {
-  int pitchingsensorValue = analogRead(A0);
-  calibratedsensorValueP = pitchingsensorValue - 50;  // set the threshold to just below current value
-  Serial.print("Setting pitching calbration to ");
-  Serial.println(calibratedsensorValueP);
-  Serial.print("Live reading is ");
-  Serial.println(pitchingsensorValue);
+volatile bool needToHandleBallDetected = false;
+void ballDetected() {
+  needToHandleBallDetected = true;
 }
 
-void calibrateSensorO() {
+unsigned long lastBallDetected = 0;
+unsigned long ballDebounceThresholdMS = 750;
+void handleBallDetected() {
+  // Code to execute when the ball is detected
+
+  // when did we last see the ball?
+  unsigned long currentBallDetected = millis();
+
+  if (currentBallDetected - lastBallDetected > ballDebounceThresholdMS) {
+    // record current ball detection as last for tracking new debounce cycle
+    lastBallDetected = currentBallDetected;
+    startTimer();
+  }
+}
+
+
+void calibrateSensor() {
   int outsensorValue = analogRead(A1);
-  calibratedsensorValueO = outsensorValue - 50;  // set the threshold to just below current value
+  calibratedOutSensorValue = outsensorValue - 50;  // set the threshold to just below current value
   Serial.print("Setting outs calbration to ");
-  Serial.println(calibratedsensorValueO);
+  Serial.println(calibratedOutSensorValue);
   Serial.print("Live reading is ");
   Serial.println(outsensorValue);
 }
@@ -210,8 +222,13 @@ void printTimerClean() {
     lastTimerAmount = timerAmount;
 
     // Serial.println("Updating Timer Display");
-    display.showNumberDec(timerAmount);
+    int seven_seg_complete = turnSecsRemaining * 100 + score;
+    // Serial.println(score);pauseTim
+    Serial.println(seven_seg_complete);
+    display.showNumberDecEx(seven_seg_complete);  // enable colon
+    //0b01000000
     // Serial.println(timerAmount);
+    delay(100);
   }
 }
 
@@ -220,6 +237,7 @@ void markGameOver() {
 }
 
 void addOut() {
+  outs += 1;
   return;
   if (outs < 3) {
     outs += 1;
@@ -241,39 +259,43 @@ void setup() {  //VOID SETUP START
   lcd.init();                // Initialize the LCD
   lcd.backlight();           // Turn on the backlight
   display.setBrightness(5);  // Turn on the 7 seg display
+  display.clear();
   while (!Serial)
-    ;                                // Wait for Serial port to connect - necessary for Leonardo, Micro, etc.
+    ;  // Wait for Serial port to connect - necessary for Leonardo, Micro, etc.
+  pinMode(PROX_SENSOR_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(PROX_SENSOR_PIN), ballDetected, CHANGE);
   Serial.println("Setup complete");  // First message to indicate setup is done
-  calibrateSensorP();
-  calibrateSensorO();
+  calibrateSensor();
   displayScore();
 }
 
 void loop() {  //VOID LOOP START
 
+  if (needToHandleBallDetected) {
+    handleBallDetected();
+    needToHandleBallDetected = false;
+  }
+
   checkTimerDecrement();
   printTimerClean();
   displayScore();
   //keypad
+
   char customKey = customKeypad.getKey();
-  if (customKey) {
-  }
 
   //keypad c = pause timer
-  if (customKey == 'RESET_PAUSE_TIMER') {
-    resetTimer();
-    pauseTimer();
-  }
-  // photoresistor pitching
-  int pitchingsensorValue = analogRead(A0);
+  if (customKey == TOGGLE_TIMER) {
+    Serial.println("toggle timer");
+    timerButtonToggle = !timerButtonToggle;
+    if (timerButtonToggle == true) {
+    Serial.println("pause timer");
+      pauseTimer();
 
-  if (pitchingsensorValue <= calibratedsensorValueP) {
-    startTimer();
-    strikes += 1;
-    if (getCurrentTime() <= 5) {
-      resetTimer();
+    } else {
+          Serial.println("unpause timer");
+
+      startTimer();
     }
-    // delay(1000);
   }
 
   //bases on keypad
@@ -290,13 +312,12 @@ void loop() {  //VOID LOOP START
 
 
   if (customKey == RECALIBRATE_SENSORS) {
-    calibrateSensorP();
-    calibrateSensorO();
+    calibrateSensor();
   }
   //photoresitor outs
   int outsensorValue = analogRead(A1);
 
-  if (outsensorValue <= calibratedsensorValueO) {
+  if (outsensorValue <= calibratedOutSensorValue) {
     pauseTimer();
     turnSecsRemaining += 3;
     addOut();
@@ -308,6 +329,7 @@ void loop() {  //VOID LOOP START
     score = 0;
     strikes = 0;
     resetTimer();
+    pauseTimer();
     lcdGOdsp = 0;  // reset game over event time
     Serial.println("Resetting all");
   }
@@ -319,6 +341,7 @@ void loop() {  //VOID LOOP START
   }
   //strike outs score plus
   if (customKey == ADD_SCORE) {
+    Serial.println("blach");
     score = score + 1;
     if (score == 10) {
       markGameOver();
